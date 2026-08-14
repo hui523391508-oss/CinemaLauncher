@@ -1,0 +1,1036 @@
+name: Build CinemaLauncher V5 APKs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/cinema/launcher
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'CinemaLauncherV5'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.cinema.launcher'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.cinema.launcher'
+                  minSdk 26
+                  targetSdk 28
+                  versionCode 7
+                  versionName '7.0'
+              }
+
+              flavorDimensions += 'edition'
+              productFlavors {
+                  diagnostic {
+                      dimension 'edition'
+                      versionCode 7
+                      versionName '7.0-test'
+                      buildConfigField 'String', 'EDITION_NAME', '"V5测试版"'
+                  }
+                  production {
+                      dimension 'edition'
+                      versionCode 8
+                      versionName '8.0-final'
+                      buildConfigField 'String', 'EDITION_NAME', '"V5最终版"'
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
+              buildFeatures {
+                  buildConfig true
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">私人影院启动器</string>
+              <string name="service_channel">私人影院 HOME 监听</string>
+              <string name="service_title">私人影院启动器正在监听 HOME 键</string>
+              <string name="service_text">用于极米 Android 8 HOME 键跳转与开机自动启动</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+
+              <application
+                  android:allowBackup="false"
+                  android:directBootAware="true"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".HomeMonitorService"
+                      android:directBootAware="true"
+                      android:enabled="true"
+                      android:exported="false" />
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:directBootAware="true"
+                      android:enabled="true"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/Prefs.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          public final class Prefs {
+              private static final String NAME = "cinema_launcher_v4";
+              private static final String TARGET_PKG = "target_pkg";
+              private static final String TARGET_CLS = "target_cls";
+              private static final String HOME_ENABLED = "home_enabled";
+              private static final String BOOT_ENABLED = "boot_enabled";
+              private static final String SERVICE_WANTED = "service_wanted";
+              private static final String BROADCAST_COUNT = "broadcast_count";
+              private static final String HOMEKEY_COUNT = "homekey_count";
+              private static final String LAUNCH_COUNT = "launch_count";
+              private static final String LAST_REASON = "last_reason";
+              private static final String MAINTENANCE_UNTIL = "maintenance_until";
+              private static final String BOOT_COUNT = "boot_count";
+              private static final String SCREEN_ON_COUNT = "screen_on_count";
+              private static final String LAST_START_SOURCE = "last_start_source";
+              private static final String LOCKED_BOOT_COUNT = "locked_boot_count";
+              private static final String USER_UNLOCKED_COUNT = "user_unlocked_count";
+              private static final String LAST_EARLY_BOOT_MS = "last_early_boot_ms";
+
+              private Prefs() {}
+
+              private static SharedPreferences p(Context c) {
+                  Context storage = c;
+                  if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                      Context dp = c.createDeviceProtectedStorageContext();
+                      if (dp != null) storage = dp;
+                  }
+                  return storage.getSharedPreferences(NAME, Context.MODE_PRIVATE);
+              }
+
+              public static void setTarget(Context c, String pkg, String cls) {
+                  p(c).edit().putString(TARGET_PKG, pkg).putString(TARGET_CLS, cls).apply();
+              }
+
+              public static String targetPkg(Context c) {
+                  return p(c).getString(TARGET_PKG, "");
+              }
+
+              public static String targetCls(Context c) {
+                  return p(c).getString(TARGET_CLS, "");
+              }
+
+              public static boolean homeEnabled(Context c) {
+                  return p(c).getBoolean(HOME_ENABLED, true);
+              }
+
+              public static void setHomeEnabled(Context c, boolean v) {
+                  p(c).edit().putBoolean(HOME_ENABLED, v).apply();
+              }
+
+              public static boolean bootEnabled(Context c) {
+                  return p(c).getBoolean(BOOT_ENABLED, true);
+              }
+
+              public static void setBootEnabled(Context c, boolean v) {
+                  p(c).edit().putBoolean(BOOT_ENABLED, v).apply();
+              }
+
+              public static boolean serviceWanted(Context c) {
+                  return p(c).getBoolean(SERVICE_WANTED, true);
+              }
+
+              public static void setServiceWanted(Context c, boolean v) {
+                  p(c).edit().putBoolean(SERVICE_WANTED, v).apply();
+              }
+
+              public static void receivedBroadcast(Context c, String reason) {
+                  int n = p(c).getInt(BROADCAST_COUNT, 0) + 1;
+                  p(c).edit()
+                          .putInt(BROADCAST_COUNT, n)
+                          .putString(LAST_REASON, reason == null ? "(null)" : reason)
+                          .apply();
+              }
+
+              public static void receivedHomeKey(Context c) {
+                  int n = p(c).getInt(HOMEKEY_COUNT, 0) + 1;
+                  p(c).edit().putInt(HOMEKEY_COUNT, n).apply();
+              }
+
+              public static void launched(Context c) {
+                  int n = p(c).getInt(LAUNCH_COUNT, 0) + 1;
+                  p(c).edit().putInt(LAUNCH_COUNT, n).apply();
+              }
+
+              public static int broadcastCount(Context c) {
+                  return p(c).getInt(BROADCAST_COUNT, 0);
+              }
+
+              public static int homeKeyCount(Context c) {
+                  return p(c).getInt(HOMEKEY_COUNT, 0);
+              }
+
+              public static int launchCount(Context c) {
+                  return p(c).getInt(LAUNCH_COUNT, 0);
+              }
+
+              public static String lastReason(Context c) {
+                  return p(c).getString(LAST_REASON, "尚未收到");
+              }
+
+              public static void resetCounters(Context c) {
+                  p(c).edit()
+                          .putInt(BROADCAST_COUNT, 0)
+                          .putInt(HOMEKEY_COUNT, 0)
+                          .putInt(LAUNCH_COUNT, 0)
+                          .putString(LAST_REASON, "尚未收到")
+                          .putInt(BOOT_COUNT, 0)
+                          .putInt(SCREEN_ON_COUNT, 0)
+                          .putString(LAST_START_SOURCE, "尚未收到")
+                          .putInt(LOCKED_BOOT_COUNT, 0)
+                          .putInt(USER_UNLOCKED_COUNT, 0)
+                          .putLong(LAST_EARLY_BOOT_MS, 0L)
+                          .apply();
+              }
+
+
+
+              public static void receivedLockedBoot(Context c) {
+                  int n = p(c).getInt(LOCKED_BOOT_COUNT, 0) + 1;
+                  p(c).edit()
+                          .putInt(LOCKED_BOOT_COUNT, n)
+                          .putLong(LAST_EARLY_BOOT_MS, android.os.SystemClock.elapsedRealtime())
+                          .putString(LAST_START_SOURCE, "LOCKED_BOOT_COMPLETED")
+                          .apply();
+              }
+
+              public static void receivedUserUnlocked(Context c) {
+                  int n = p(c).getInt(USER_UNLOCKED_COUNT, 0) + 1;
+                  p(c).edit().putInt(USER_UNLOCKED_COUNT, n).putString(LAST_START_SOURCE, "USER_UNLOCKED").apply();
+              }
+
+              public static int lockedBootCount(Context c) {
+                  return p(c).getInt(LOCKED_BOOT_COUNT, 0);
+              }
+
+              public static int userUnlockedCount(Context c) {
+                  return p(c).getInt(USER_UNLOCKED_COUNT, 0);
+              }
+
+              public static long lastEarlyBootMs(Context c) {
+                  return p(c).getLong(LAST_EARLY_BOOT_MS, 0L);
+              }
+
+              public static void receivedBoot(Context c) {
+                  int n = p(c).getInt(BOOT_COUNT, 0) + 1;
+                  p(c).edit().putInt(BOOT_COUNT, n).putString(LAST_START_SOURCE, "BOOT_COMPLETED").apply();
+              }
+
+              public static void receivedScreenOn(Context c) {
+                  int n = p(c).getInt(SCREEN_ON_COUNT, 0) + 1;
+                  p(c).edit().putInt(SCREEN_ON_COUNT, n).putString(LAST_START_SOURCE, "SCREEN_ON").apply();
+              }
+
+              public static int bootCount(Context c) {
+                  return p(c).getInt(BOOT_COUNT, 0);
+              }
+
+              public static int screenOnCount(Context c) {
+                  return p(c).getInt(SCREEN_ON_COUNT, 0);
+              }
+
+              public static String lastStartSource(Context c) {
+                  return p(c).getString(LAST_START_SOURCE, "尚未收到");
+              }
+
+              public static void setMaintenanceUntil(Context c, long until) {
+                  p(c).edit().putLong(MAINTENANCE_UNTIL, until).apply();
+              }
+
+              public static long maintenanceUntil(Context c) {
+                  return p(c).getLong(MAINTENANCE_UNTIL, 0L);
+              }
+
+              public static void clearMaintenance(Context c) {
+                  p(c).edit().putLong(MAINTENANCE_UNTIL, 0L).apply();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/AppUtils.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+
+          import java.util.List;
+
+          public final class AppUtils {
+              private AppUtils() {}
+
+              public static boolean launchTarget(Context c) {
+                  String pkg = Prefs.targetPkg(c);
+                  String cls = Prefs.targetCls(c);
+                  if (pkg.isEmpty()) return false;
+
+                  try {
+                      Intent i;
+                      if (!cls.isEmpty()) {
+                          i = new Intent(Intent.ACTION_MAIN);
+                          i.addCategory(Intent.CATEGORY_LAUNCHER);
+                          i.setComponent(new ComponentName(pkg, cls));
+                      } else {
+                          i = c.getPackageManager().getLaunchIntentForPackage(pkg);
+                          if (i == null) return false;
+                      }
+
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                              | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                              | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                      c.startActivity(i);
+                      Prefs.launched(c);
+                      return true;
+                  } catch (Exception first) {
+                      try {
+                          Intent fallback = c.getPackageManager().getLaunchIntentForPackage(pkg);
+                          if (fallback == null) return false;
+                          fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                  | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                                  | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                          c.startActivity(fallback);
+                          Prefs.launched(c);
+                          return true;
+                      } catch (Exception ignored) {
+                          return false;
+                      }
+                  }
+              }
+
+              public static ComponentName findSystemHome(Context c) {
+                  PackageManager pm = c.getPackageManager();
+                  Intent i = new Intent(Intent.ACTION_MAIN);
+                  i.addCategory(Intent.CATEGORY_HOME);
+                  List<ResolveInfo> homes = pm.queryIntentActivities(i, PackageManager.MATCH_ALL);
+
+                  for (ResolveInfo r : homes) {
+                      if (r.activityInfo == null) continue;
+                      String pkg = r.activityInfo.packageName;
+                      if (!c.getPackageName().equals(pkg)) {
+                          return new ComponentName(pkg, r.activityInfo.name);
+                      }
+                  }
+                  return null;
+              }
+
+              public static boolean openSystemHome(Context c) {
+                  ComponentName cn = findSystemHome(c);
+                  try {
+                      if (cn != null) {
+                          Intent i = new Intent(Intent.ACTION_MAIN);
+                          i.addCategory(Intent.CATEGORY_HOME);
+                          i.setComponent(cn);
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          c.startActivity(i);
+                          return true;
+                      }
+
+                      Intent x = c.getPackageManager().getLaunchIntentForPackage("com.xgimi.home");
+                      if (x != null) {
+                          x.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          c.startActivity(x);
+                          return true;
+                      }
+                  } catch (Exception ignored) {}
+                  return false;
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/HomeMonitorService.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.IntentFilter;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+
+          public class HomeMonitorService extends Service {
+              public static final String ACTION_START = "com.cinema.launcher.START_MONITOR";
+              public static final String ACTION_STOP = "com.cinema.launcher.STOP_MONITOR";
+              public static final String EXTRA_FROM_BOOT = "from_boot";
+
+              private static final String CHANNEL = "cinema_home_monitor";
+              private static final int NOTIFICATION_ID = 4101;
+              private static final long HOME_RELAUNCH_DELAY_MS = 5300L;
+
+              private final Handler handler = new Handler(Looper.getMainLooper());
+              private boolean registered = false;
+
+              private final BroadcastReceiver closeDialogsReceiver = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context context, Intent intent) {
+                      if (intent == null) return;
+
+                      if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
+                          Prefs.receivedScreenOn(context);
+                          if (!Prefs.bootEnabled(context)) return;
+                          if (System.currentTimeMillis() < Prefs.maintenanceUntil(context)) return;
+                          if (Prefs.targetPkg(context).isEmpty()) return;
+                          handler.removeCallbacks(wakeLaunchRunnable);
+                          handler.postDelayed(wakeLaunchRunnable, 1800L);
+                          return;
+                      }
+
+                      if (Intent.ACTION_USER_UNLOCKED.equals(intent.getAction())) {
+                          Prefs.receivedUserUnlocked(context);
+                          if (!Prefs.bootEnabled(context)) return;
+                          if (System.currentTimeMillis() < Prefs.maintenanceUntil(context)) return;
+                          if (Prefs.targetPkg(context).isEmpty()) return;
+                          handler.removeCallbacks(wakeLaunchRunnable);
+                          handler.postDelayed(wakeLaunchRunnable, 1200L);
+                          return;
+                      }
+
+                      if (!Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(intent.getAction())) return;
+
+                      String reason = intent.getStringExtra("reason");
+                      Prefs.receivedBroadcast(context, reason);
+
+                      if (!"homekey".equals(reason)) return;
+
+                      Prefs.receivedHomeKey(context);
+
+                      if (!Prefs.homeEnabled(context)) return;
+                      if (System.currentTimeMillis() < Prefs.maintenanceUntil(context)) return;
+                      if (Prefs.targetPkg(context).isEmpty()) return;
+
+                      handler.removeCallbacks(relaunchRunnable);
+                      handler.postDelayed(relaunchRunnable, HOME_RELAUNCH_DELAY_MS);
+                  }
+              };
+
+              private final Runnable relaunchRunnable = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (!Prefs.homeEnabled(HomeMonitorService.this)) return;
+                      if (System.currentTimeMillis() < Prefs.maintenanceUntil(HomeMonitorService.this)) return;
+                      AppUtils.launchTarget(HomeMonitorService.this);
+                  }
+              };
+
+              private final Runnable wakeLaunchRunnable = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (!Prefs.bootEnabled(HomeMonitorService.this)) return;
+                      if (System.currentTimeMillis() < Prefs.maintenanceUntil(HomeMonitorService.this)) return;
+                      AppUtils.launchTarget(HomeMonitorService.this);
+                  }
+              };
+
+              private final Runnable bootLaunchRunnable = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (!Prefs.bootEnabled(HomeMonitorService.this)) return;
+                      if (Prefs.targetPkg(HomeMonitorService.this).isEmpty()) return;
+                      Prefs.clearMaintenance(HomeMonitorService.this);
+                      AppUtils.launchTarget(HomeMonitorService.this);
+                  }
+              };
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  ensureNotificationChannel();
+                  startForeground(NOTIFICATION_ID, buildNotification());
+                  registerMonitor();
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  String action = intent == null ? null : intent.getAction();
+
+                  if (ACTION_STOP.equals(action)) {
+                      Prefs.setServiceWanted(this, false);
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+
+                  Prefs.setServiceWanted(this, true);
+                  registerMonitor();
+
+                  if (intent != null && intent.getBooleanExtra(EXTRA_FROM_BOOT, false)) {
+                      handler.removeCallbacks(bootLaunchRunnable);
+                      // Fallback if SCREEN_ON/USER_UNLOCKED is not observed.
+                      handler.postDelayed(bootLaunchRunnable, 6500L);
+                  }
+
+                  return START_STICKY;
+              }
+
+              private void registerMonitor() {
+                  if (registered) return;
+                  IntentFilter filter = new IntentFilter();
+                  filter.addAction(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
+                  filter.addAction(Intent.ACTION_SCREEN_ON);
+                  filter.addAction(Intent.ACTION_USER_UNLOCKED);
+                  registerReceiver(closeDialogsReceiver, filter);
+                  registered = true;
+              }
+
+              private void ensureNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      NotificationChannel ch = new NotificationChannel(
+                              CHANNEL,
+                              getString(R.string.service_channel),
+                              NotificationManager.IMPORTANCE_MIN
+                      );
+                      ch.setSound(null, null);
+                      ch.enableVibration(false);
+                      ch.setShowBadge(false);
+                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                      if (nm != null) nm.createNotificationChannel(ch);
+                  }
+              }
+
+              private Notification buildNotification() {
+                  Intent open = new Intent(this, MainActivity.class);
+                  PendingIntent pi = PendingIntent.getActivity(
+                          this,
+                          0,
+                          open,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  Notification.Builder b;
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      b = new Notification.Builder(this, CHANNEL);
+                  } else {
+                      b = new Notification.Builder(this);
+                  }
+
+                  return b
+                          .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                          .setContentTitle(getString(R.string.service_title))
+                          .setContentText(getString(R.string.service_text))
+                          .setContentIntent(pi)
+                          .setOngoing(true)
+                          .setShowWhen(false)
+                          .build();
+              }
+
+              @Override
+              public void onDestroy() {
+                  handler.removeCallbacksAndMessages(null);
+                  if (registered) {
+                      try {
+                          unregisterReceiver(closeDialogsReceiver);
+                      } catch (Exception ignored) {}
+                      registered = false;
+                  }
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/BootReceiver.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  if (intent == null) return;
+                  String action = intent.getAction();
+
+                  if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
+                          && !Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)) {
+                      return;
+                  }
+
+                  if (Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)) {
+                      Prefs.receivedLockedBoot(context);
+                  } else {
+                      Prefs.receivedBoot(context);
+                  }
+
+                  if (!Prefs.serviceWanted(context) && !Prefs.bootEnabled(context)) return;
+
+                  Intent s = new Intent(context, HomeMonitorService.class);
+                  s.setAction(HomeMonitorService.ACTION_START);
+                  s.putExtra(HomeMonitorService.EXTRA_FROM_BOOT, true);
+
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          context.startForegroundService(s);
+                      } else {
+                          context.startService(s);
+                      }
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/MainActivity.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Spinner;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+              private Spinner appSpinner;
+              private TextView status;
+              private final List<AppEntry> apps = new ArrayList<>();
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  buildUi();
+                  refreshApps();
+                  if (Prefs.serviceWanted(this)) {
+                      startMonitor(false);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateStatus();
+              }
+
+              private void buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(44, 28, 44, 40);
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("私人影院启动器 · " + BuildConfig.EDITION_NAME);
+                  title.setTextSize(25);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, fullWidth());
+
+                  TextView explain = new TextView(this);
+                  explain.setText(
+                          "\nV5：使用 Direct Boot 抢开机早期阶段，不需要默认桌面，也不需要无障碍。\n"
+                          + "① 选择影院软件并保存\n"
+                          + "② 启动 HOME 监听服务\n"
+                          + "③ 打开影院软件后按 HOME\n"
+                          + "④ 约5秒后应自动重新进入影院软件\n"
+                          + "⑤ 回本页查看 LOCKED_BOOT / BOOT / SCREEN_ON / USER_UNLOCKED 诊断计数\n"
+                  );
+                  explain.setTextSize(16);
+                  root.addView(explain, fullWidth());
+
+                  appSpinner = new Spinner(this);
+                  appSpinner.setFocusable(true);
+                  root.addView(appSpinner, fullWidth());
+
+                  Button save = button("保存为影院软件");
+                  save.setOnClickListener(v -> saveSelected());
+                  root.addView(save, fullWidth());
+
+                  Button start = button("启动 HOME 监听服务（必须）");
+                  start.setOnClickListener(v -> startMonitor(false));
+                  root.addView(start, fullWidth());
+
+                  Button stop = button("停止 HOME 监听服务");
+                  stop.setOnClickListener(v -> stopMonitor());
+                  root.addView(stop, fullWidth());
+
+                  Button test = button("测试打开影院软件");
+                  test.setOnClickListener(v -> {
+                      Prefs.clearMaintenance(this);
+                      if (!AppUtils.launchTarget(this)) toast("影院软件启动失败");
+                      updateStatus();
+                  });
+                  root.addView(test, fullWidth());
+
+                  Button homeOn = button("开启 HOME 自动返回影院");
+                  homeOn.setOnClickListener(v -> {
+                      Prefs.setHomeEnabled(this, true);
+                      Prefs.clearMaintenance(this);
+                      toast("HOME 自动返回已开启");
+                      updateStatus();
+                  });
+                  root.addView(homeOn, fullWidth());
+
+                  Button homeOff = button("关闭 HOME 自动返回");
+                  homeOff.setOnClickListener(v -> {
+                      Prefs.setHomeEnabled(this, false);
+                      toast("HOME 自动返回已关闭");
+                      updateStatus();
+                  });
+                  root.addView(homeOff, fullWidth());
+
+                  Button bootOn = button("开启开机自动进入影院软件");
+                  bootOn.setOnClickListener(v -> {
+                      Prefs.setBootEnabled(this, true);
+                      Prefs.setServiceWanted(this, true);
+                      toast("开机自动启动已开启");
+                      updateStatus();
+                  });
+                  root.addView(bootOn, fullWidth());
+
+                  Button bootOff = button("关闭开机自动启动");
+                  bootOff.setOnClickListener(v -> {
+                      Prefs.setBootEnabled(this, false);
+                      toast("开机自动启动已关闭");
+                      updateStatus();
+                  });
+                  root.addView(bootOff, fullWidth());
+
+                  Button maintenance = button("进入极米原桌面（暂停接管10分钟）");
+                  maintenance.setOnClickListener(v -> {
+                      Prefs.setMaintenanceUntil(this, System.currentTimeMillis() + 10 * 60 * 1000L);
+                      if (!AppUtils.openSystemHome(this)) toast("无法打开极米原桌面");
+                  });
+                  root.addView(maintenance, fullWidth());
+
+                  Button endMaintenance = button("结束维护并恢复 HOME 接管");
+                  endMaintenance.setOnClickListener(v -> {
+                      Prefs.clearMaintenance(this);
+                      toast("已恢复 HOME 接管");
+                      updateStatus();
+                  });
+                  root.addView(endMaintenance, fullWidth());
+
+                  Button reset = button("清零诊断计数");
+                  reset.setOnClickListener(v -> {
+                      Prefs.resetCounters(this);
+                      updateStatus();
+                  });
+                  root.addView(reset, fullWidth());
+
+                  Button refresh = button("重新扫描应用");
+                  refresh.setOnClickListener(v -> refreshApps());
+                  root.addView(refresh, fullWidth());
+
+                  status = new TextView(this);
+                  status.setTextSize(15);
+                  status.setPadding(0, 20, 0, 20);
+                  root.addView(status, fullWidth());
+
+                  setContentView(scroll);
+              }
+
+              private LinearLayout.LayoutParams fullWidth() {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                  );
+                  p.setMargins(0, 7, 0, 7);
+                  return p;
+              }
+
+              private Button button(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextSize(17);
+                  b.setFocusable(true);
+                  return b;
+              }
+
+              private void startMonitor(boolean fromBoot) {
+                  Prefs.setServiceWanted(this, true);
+                  Intent s = new Intent(this, HomeMonitorService.class);
+                  s.setAction(HomeMonitorService.ACTION_START);
+                  s.putExtra(HomeMonitorService.EXTRA_FROM_BOOT, fromBoot);
+                  try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                          startForegroundService(s);
+                      } else {
+                          startService(s);
+                      }
+                      toast("HOME 监听服务已启动");
+                  } catch (Exception e) {
+                      toast("启动监听服务失败：" + e.getClass().getSimpleName());
+                  }
+                  updateStatus();
+              }
+
+              private void stopMonitor() {
+                  Prefs.setServiceWanted(this, false);
+                  Intent s = new Intent(this, HomeMonitorService.class);
+                  s.setAction(HomeMonitorService.ACTION_STOP);
+                  try {
+                      startService(s);
+                  } catch (Exception ignored) {
+                      stopService(new Intent(this, HomeMonitorService.class));
+                  }
+                  toast("HOME 监听服务已停止");
+                  updateStatus();
+              }
+
+              private void refreshApps() {
+                  apps.clear();
+                  Set<String> seen = new HashSet<>();
+                  collect(Intent.CATEGORY_LEANBACK_LAUNCHER, seen);
+                  collect(Intent.CATEGORY_LAUNCHER, seen);
+                  Collections.sort(apps, Comparator.comparing(a -> a.label.toLowerCase()));
+
+                  ArrayAdapter<AppEntry> adapter = new ArrayAdapter<>(
+                          this,
+                          android.R.layout.simple_spinner_item,
+                          apps
+                  );
+                  adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+                  appSpinner.setAdapter(adapter);
+
+                  String savedPkg = Prefs.targetPkg(this);
+                  String savedCls = Prefs.targetCls(this);
+                  for (int i = 0; i < apps.size(); i++) {
+                      AppEntry e = apps.get(i);
+                      if (e.pkg.equals(savedPkg) && e.cls.equals(savedCls)) {
+                          appSpinner.setSelection(i);
+                          break;
+                      }
+                  }
+
+                  updateStatus();
+              }
+
+              private void collect(String category, Set<String> seen) {
+                  PackageManager pm = getPackageManager();
+                  Intent q = new Intent(Intent.ACTION_MAIN);
+                  q.addCategory(category);
+                  List<ResolveInfo> list = pm.queryIntentActivities(q, PackageManager.MATCH_ALL);
+
+                  for (ResolveInfo r : list) {
+                      if (r.activityInfo == null) continue;
+                      String pkg = r.activityInfo.packageName;
+                      String cls = r.activityInfo.name;
+                      if (getPackageName().equals(pkg)) continue;
+
+                      String key = pkg + "/" + cls;
+                      if (!seen.add(key)) continue;
+
+                      CharSequence cs = r.loadLabel(pm);
+                      String label = cs == null ? pkg : cs.toString();
+                      apps.add(new AppEntry(label, pkg, cls));
+                  }
+              }
+
+              private void saveSelected() {
+                  Object o = appSpinner.getSelectedItem();
+                  if (!(o instanceof AppEntry)) {
+                      toast("没有可选择的应用");
+                      return;
+                  }
+
+                  AppEntry e = (AppEntry) o;
+                  Prefs.setTarget(this, e.pkg, e.cls);
+                  Prefs.clearMaintenance(this);
+                  toast("已保存：" + e.label);
+                  updateStatus();
+              }
+
+              private void updateStatus() {
+                  if (status == null) return;
+
+                  String target = Prefs.targetPkg(this);
+                  long left = Math.max(0L, Prefs.maintenanceUntil(this) - System.currentTimeMillis());
+
+                  status.setText(
+                          "影院软件：" + (target.isEmpty() ? "未选择" : target)
+                                  + "\nHOME 监听服务目标状态：" + (Prefs.serviceWanted(this) ? "运行" : "停止")
+                                  + "\nHOME 自动返回：" + (Prefs.homeEnabled(this) ? "开启" : "关闭")
+                                  + "\n收到 CLOSE_SYSTEM_DIALOGS 次数：" + Prefs.broadcastCount(this)
+                                  + "\n其中 reason=homekey 次数：" + Prefs.homeKeyCount(this)
+                                  + "\n最后一次 reason：" + Prefs.lastReason(this)
+                                  + "\n自动打开影院软件次数：" + Prefs.launchCount(this)
+                                  + "\n开机自动启动：" + (Prefs.bootEnabled(this) ? "开启" : "关闭")
+                                  + "\n收到 LOCKED_BOOT_COMPLETED 次数：" + Prefs.lockedBootCount(this)
+                                  + "\n收到 BOOT_COMPLETED 次数：" + Prefs.bootCount(this)
+                                  + "\n收到 SCREEN_ON 次数：" + Prefs.screenOnCount(this)
+                                  + "\n收到 USER_UNLOCKED 次数：" + Prefs.userUnlockedCount(this)
+                                  + "\n最近启动触发来源：" + Prefs.lastStartSource(this)
+                                  + "\n维护剩余：" + (left > 0 ? (left / 1000) + " 秒" : "无")
+                                  + "\n\n开机诊断：完全断电重启后，最关键先看 LOCKED_BOOT_COMPLETED；它应明显早于普通 BOOT_COMPLETED。SCREEN_ON 或 USER_UNLOCKED 到达后会尽快拉起影院软件。"
+                                  + "\nHOME诊断：按一次遥控器 HOME 后，"
+                                  + "“reason=homekey 次数”如果增加，说明极米保留了 Android 8 HOME 广播。"
+                  );
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+              }
+
+              private static class AppEntry {
+                  final String label;
+                  final String pkg;
+                  final String cls;
+
+                  AppEntry(String label, String pkg, String cls) {
+                      this.label = label;
+                      this.pkg = pkg;
+                      this.cls = cls;
+                  }
+
+                  @Override
+                  public String toString() {
+                      return label + "  (" + pkg + ")";
+                  }
+              }
+          }
+          EOF
+
+      - name: Build V5 APKs
+        run: |
+          gradle --no-daemon :app:assembleDiagnosticDebug :app:assembleProductionDebug
+
+      - name: Prepare output names
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/diagnostic/debug/app-diagnostic-debug.apk out/CinemaLauncher-V5-TEST.apk
+          cp app/build/outputs/apk/production/debug/app-production-debug.apk out/CinemaLauncher-V5-FINAL.apk
+          sha256sum out/*.apk > out/SHA256SUMS.txt
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: CinemaLauncher-V5-APKs
+          path: out/*
+          retention-days: 30
