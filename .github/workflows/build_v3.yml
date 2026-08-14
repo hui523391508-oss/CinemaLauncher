@@ -1,0 +1,800 @@
+name: Build CinemaLauncher V3 APKs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/cinema/launcher
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'CinemaLauncherV3'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.cinema.launcher'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.cinema.launcher'
+                  minSdk 26
+                  targetSdk 28
+                  versionCode 3
+                  versionName '3.0'
+              }
+
+              flavorDimensions += 'edition'
+              productFlavors {
+                  diagnostic {
+                      dimension 'edition'
+                      versionCode 3
+                      versionName '3.0-test'
+                      buildConfigField 'String', 'EDITION_NAME', '"V3测试版"'
+                  }
+                  production {
+                      dimension 'edition'
+                      versionCode 4
+                      versionName '4.0-final'
+                      buildConfigField 'String', 'EDITION_NAME', '"V3最终版"'
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
+              buildFeatures {
+                  buildConfig true
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">私人影院启动器</string>
+              <string name="accessibility_name">私人影院 HOME 键接管</string>
+              <string name="accessibility_desc">用于在极米投影仪上捕获遥控器 HOME 键并打开指定影院软件。</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:description="@string/accessibility_desc"
+              android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="0"
+              android:accessibilityFlags="flagRequestFilterKeyEvents"
+              android:canRequestFilterKeyEvents="true"
+              android:canRetrieveWindowContent="false" />
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".HomeKeyAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:enabled="true"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <receiver
+                      android:name=".LaunchReceiver"
+                      android:enabled="true"
+                      android:exported="false" />
+
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/Prefs.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          public final class Prefs {
+              private static final String NAME = "cinema_launcher_v3";
+              private static final String TARGET_PKG = "target_pkg";
+              private static final String TARGET_CLS = "target_cls";
+              private static final String BOOT_ENABLED = "boot_enabled";
+              private static final String HOME_ENABLED = "home_enabled";
+              private static final String HOME_COUNT = "home_count";
+              private static final String MAINTENANCE_UNTIL = "maintenance_until";
+
+              private Prefs() {}
+
+              private static SharedPreferences p(Context c) {
+                  return c.getSharedPreferences(NAME, Context.MODE_PRIVATE);
+              }
+
+              public static void setTarget(Context c, String pkg, String cls) {
+                  p(c).edit().putString(TARGET_PKG, pkg).putString(TARGET_CLS, cls).apply();
+              }
+
+              public static String targetPkg(Context c) {
+                  return p(c).getString(TARGET_PKG, "");
+              }
+
+              public static String targetCls(Context c) {
+                  return p(c).getString(TARGET_CLS, "");
+              }
+
+              public static boolean bootEnabled(Context c) {
+                  return p(c).getBoolean(BOOT_ENABLED, true);
+              }
+
+              public static void setBootEnabled(Context c, boolean v) {
+                  p(c).edit().putBoolean(BOOT_ENABLED, v).apply();
+              }
+
+              public static boolean homeEnabled(Context c) {
+                  return p(c).getBoolean(HOME_ENABLED, true);
+              }
+
+              public static void setHomeEnabled(Context c, boolean v) {
+                  p(c).edit().putBoolean(HOME_ENABLED, v).apply();
+              }
+
+              public static int incrementHomeCount(Context c) {
+                  int n = p(c).getInt(HOME_COUNT, 0) + 1;
+                  p(c).edit().putInt(HOME_COUNT, n).apply();
+                  return n;
+              }
+
+              public static int homeCount(Context c) {
+                  return p(c).getInt(HOME_COUNT, 0);
+              }
+
+              public static void setMaintenanceUntil(Context c, long when) {
+                  p(c).edit().putLong(MAINTENANCE_UNTIL, when).apply();
+              }
+
+              public static long maintenanceUntil(Context c) {
+                  return p(c).getLong(MAINTENANCE_UNTIL, 0L);
+              }
+
+              public static void clearMaintenance(Context c) {
+                  p(c).edit().putLong(MAINTENANCE_UNTIL, 0L).apply();
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/AppUtils.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+
+          import java.util.List;
+
+          public final class AppUtils {
+              private AppUtils() {}
+
+              public static boolean launchTarget(Context c) {
+                  String pkg = Prefs.targetPkg(c);
+                  String cls = Prefs.targetCls(c);
+                  if (pkg.isEmpty()) return false;
+
+                  try {
+                      Intent i;
+                      if (!cls.isEmpty()) {
+                          i = new Intent(Intent.ACTION_MAIN);
+                          i.addCategory(Intent.CATEGORY_LAUNCHER);
+                          i.setComponent(new ComponentName(pkg, cls));
+                      } else {
+                          i = c.getPackageManager().getLaunchIntentForPackage(pkg);
+                          if (i == null) return false;
+                      }
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                              | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                              | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                      c.startActivity(i);
+                      return true;
+                  } catch (Exception first) {
+                      try {
+                          Intent fallback = c.getPackageManager().getLaunchIntentForPackage(pkg);
+                          if (fallback == null) return false;
+                          fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                  | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                                  | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                          c.startActivity(fallback);
+                          return true;
+                      } catch (Exception ignored) {
+                          return false;
+                      }
+                  }
+              }
+
+              public static ComponentName findSystemHome(Context c) {
+                  PackageManager pm = c.getPackageManager();
+                  Intent i = new Intent(Intent.ACTION_MAIN);
+                  i.addCategory(Intent.CATEGORY_HOME);
+                  List<ResolveInfo> homes = pm.queryIntentActivities(i, PackageManager.MATCH_ALL);
+                  for (ResolveInfo r : homes) {
+                      if (r.activityInfo == null) continue;
+                      String pkg = r.activityInfo.packageName;
+                      if (!c.getPackageName().equals(pkg)) {
+                          return new ComponentName(pkg, r.activityInfo.name);
+                      }
+                  }
+                  return null;
+              }
+
+              public static boolean openSystemHome(Context c) {
+                  Prefs.setMaintenanceUntil(c, System.currentTimeMillis() + 10 * 60 * 1000L);
+                  ComponentName cn = findSystemHome(c);
+                  try {
+                      if (cn != null) {
+                          Intent i = new Intent(Intent.ACTION_MAIN);
+                          i.addCategory(Intent.CATEGORY_HOME);
+                          i.setComponent(cn);
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          c.startActivity(i);
+                          return true;
+                      }
+                      Intent xgimi = c.getPackageManager().getLaunchIntentForPackage("com.xgimi.home");
+                      if (xgimi != null) {
+                          xgimi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          c.startActivity(xgimi);
+                          return true;
+                      }
+                  } catch (Exception ignored) {}
+                  return false;
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/BootReceiver.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.app.AlarmManager;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.SystemClock;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  if (!Prefs.bootEnabled(context)) return;
+                  String action = intent == null ? null : intent.getAction();
+                  if (!Intent.ACTION_BOOT_COMPLETED.equals(action)
+                          && !Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)) return;
+
+                  Prefs.clearMaintenance(context);
+
+                  Intent launch = new Intent(context, LaunchReceiver.class);
+                  PendingIntent pi = PendingIntent.getBroadcast(
+                          context,
+                          301,
+                          launch,
+                          PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+                  if (am != null) {
+                      long when = SystemClock.elapsedRealtime() + 8000L;
+                      am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, when, pi);
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/LaunchReceiver.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class LaunchReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  if (Prefs.bootEnabled(context)) {
+                      AppUtils.launchTarget(context);
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/HomeKeyAccessibilityService.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.AccessibilityServiceInfo;
+          import android.content.ComponentName;
+          import android.view.KeyEvent;
+          import android.view.accessibility.AccessibilityEvent;
+
+          public class HomeKeyAccessibilityService extends AccessibilityService {
+              private String currentPackage = "";
+              private long lastBackFromTargetAt = 0L;
+              private long lastLaunchAt = 0L;
+
+              @Override
+              protected void onServiceConnected() {
+                  super.onServiceConnected();
+                  AccessibilityServiceInfo info = getServiceInfo();
+                  if (info != null) {
+                      info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+                      setServiceInfo(info);
+                  }
+              }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  if (event == null) return;
+                  CharSequence p = event.getPackageName();
+                  if (p == null) return;
+
+                  String pkg = p.toString();
+                  currentPackage = pkg;
+
+                  ComponentName systemHome = AppUtils.findSystemHome(this);
+                  String homePkg = systemHome == null ? "com.xgimi.home" : systemHome.getPackageName();
+
+                  if (!homePkg.equals(pkg)) return;
+                  if (!Prefs.homeEnabled(this)) return;
+
+                  long now = System.currentTimeMillis();
+
+                  if (Prefs.maintenanceUntil(this) > now) {
+                      return;
+                  }
+
+                  String target = Prefs.targetPkg(this);
+                  if (target.isEmpty()) return;
+
+                  if (now - lastBackFromTargetAt <= 1600L) {
+                      lastBackFromTargetAt = 0L;
+                      return;
+                  }
+
+                  if (now - lastLaunchAt < 1200L) return;
+                  lastLaunchAt = now;
+                  AppUtils.launchTarget(this);
+              }
+
+              @Override
+              public void onInterrupt() {
+              }
+
+              @Override
+              protected boolean onKeyEvent(KeyEvent event) {
+                  if (event == null) return false;
+
+                  int code = event.getKeyCode();
+
+                  if (code == KeyEvent.KEYCODE_HOME && Prefs.homeEnabled(this)) {
+                      if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                          Prefs.incrementHomeCount(this);
+                          Prefs.clearMaintenance(this);
+                          lastLaunchAt = System.currentTimeMillis();
+                          AppUtils.launchTarget(this);
+                      }
+                      return true;
+                  }
+
+                  if (code == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_DOWN) {
+                      String target = Prefs.targetPkg(this);
+                      if (!target.isEmpty() && target.equals(currentPackage)) {
+                          lastBackFromTargetAt = System.currentTimeMillis();
+                      }
+                  }
+
+                  return false;
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cinema/launcher/MainActivity.java <<'EOF'
+          package com.cinema.launcher;
+
+          import android.accessibilityservice.AccessibilityServiceInfo;
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.os.Bundle;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.accessibility.AccessibilityManager;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Spinner;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+              private Spinner appSpinner;
+              private TextView status;
+              private final List<AppEntry> apps = new ArrayList<>();
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  buildUi();
+                  refreshApps();
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateStatus();
+              }
+
+              private void buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(44, 28, 44, 40);
+                  root.setGravity(Gravity.CENTER_HORIZONTAL);
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("私人影院启动器 · " + BuildConfig.EDITION_NAME);
+                  title.setTextSize(25);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title, fullWidth());
+
+                  TextView explain = new TextView(this);
+                  explain.setText(
+                          "\n本版不再要求设置默认桌面。\n"
+                          + "① 选择影院软件并保存\n"
+                          + "② 打开无障碍设置，开启“私人影院 HOME 键接管”\n"
+                          + "③ 测试 HOME 键\n"
+                          + "④ 重启投影仪测试开机自动进入影院软件\n"
+                  );
+                  explain.setTextSize(16);
+                  root.addView(explain, fullWidth());
+
+                  appSpinner = new Spinner(this);
+                  appSpinner.setFocusable(true);
+                  root.addView(appSpinner, fullWidth());
+
+                  Button save = button("保存为影院软件");
+                  save.setOnClickListener(v -> saveSelected());
+                  root.addView(save, fullWidth());
+
+                  Button accessibility = button("打开无障碍设置（必须开启）");
+                  accessibility.setOnClickListener(v -> openAccessibilitySettings());
+                  root.addView(accessibility, fullWidth());
+
+                  Button test = button("测试打开影院软件");
+                  test.setOnClickListener(v -> {
+                      Prefs.clearMaintenance(this);
+                      if (!AppUtils.launchTarget(this)) toast("影院软件启动失败");
+                  });
+                  root.addView(test, fullWidth());
+
+                  Button homeOn = button("开启 HOME 键接管");
+                  homeOn.setOnClickListener(v -> {
+                      Prefs.setHomeEnabled(this, true);
+                      Prefs.clearMaintenance(this);
+                      toast("HOME 键接管已开启");
+                      updateStatus();
+                  });
+                  root.addView(homeOn, fullWidth());
+
+                  Button homeOff = button("关闭 HOME 键接管");
+                  homeOff.setOnClickListener(v -> {
+                      Prefs.setHomeEnabled(this, false);
+                      toast("HOME 键接管已关闭");
+                      updateStatus();
+                  });
+                  root.addView(homeOff, fullWidth());
+
+                  Button bootOn = button("开启开机自动进入影院软件");
+                  bootOn.setOnClickListener(v -> {
+                      Prefs.setBootEnabled(this, true);
+                      toast("开机自动启动已开启");
+                      updateStatus();
+                  });
+                  root.addView(bootOn, fullWidth());
+
+                  Button bootOff = button("关闭开机自动启动");
+                  bootOff.setOnClickListener(v -> {
+                      Prefs.setBootEnabled(this, false);
+                      toast("开机自动启动已关闭");
+                      updateStatus();
+                  });
+                  root.addView(bootOff, fullWidth());
+
+                  Button systemHome = button("进入极米原桌面（维护10分钟）");
+                  systemHome.setOnClickListener(v -> {
+                      if (!AppUtils.openSystemHome(this)) toast("无法打开极米原桌面");
+                  });
+                  root.addView(systemHome, fullWidth());
+
+                  Button refresh = button("重新扫描应用");
+                  refresh.setOnClickListener(v -> refreshApps());
+                  root.addView(refresh, fullWidth());
+
+                  status = new TextView(this);
+                  status.setTextSize(15);
+                  status.setPadding(0, 20, 0, 20);
+                  root.addView(status, fullWidth());
+
+                  setContentView(scroll);
+              }
+
+              private LinearLayout.LayoutParams fullWidth() {
+                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                  );
+                  p.setMargins(0, 7, 0, 7);
+                  return p;
+              }
+
+              private Button button(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextSize(17);
+                  b.setFocusable(true);
+                  return b;
+              }
+
+              private void refreshApps() {
+                  apps.clear();
+                  Set<String> seen = new HashSet<>();
+                  collect(Intent.CATEGORY_LEANBACK_LAUNCHER, seen);
+                  collect(Intent.CATEGORY_LAUNCHER, seen);
+                  Collections.sort(apps, Comparator.comparing(a -> a.label.toLowerCase()));
+
+                  ArrayAdapter<AppEntry> adapter = new ArrayAdapter<>(
+                          this,
+                          android.R.layout.simple_spinner_item,
+                          apps
+                  );
+                  adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+                  appSpinner.setAdapter(adapter);
+
+                  String savedPkg = Prefs.targetPkg(this);
+                  String savedCls = Prefs.targetCls(this);
+                  for (int i = 0; i < apps.size(); i++) {
+                      AppEntry e = apps.get(i);
+                      if (e.pkg.equals(savedPkg) && e.cls.equals(savedCls)) {
+                          appSpinner.setSelection(i);
+                          break;
+                      }
+                  }
+                  updateStatus();
+              }
+
+              private void collect(String category, Set<String> seen) {
+                  PackageManager pm = getPackageManager();
+                  Intent q = new Intent(Intent.ACTION_MAIN);
+                  q.addCategory(category);
+                  List<ResolveInfo> list = pm.queryIntentActivities(q, PackageManager.MATCH_ALL);
+                  for (ResolveInfo r : list) {
+                      if (r.activityInfo == null) continue;
+                      String pkg = r.activityInfo.packageName;
+                      String cls = r.activityInfo.name;
+                      if (getPackageName().equals(pkg)) continue;
+                      String key = pkg + "/" + cls;
+                      if (!seen.add(key)) continue;
+                      CharSequence cs = r.loadLabel(pm);
+                      String label = cs == null ? pkg : cs.toString();
+                      apps.add(new AppEntry(label, pkg, cls));
+                  }
+              }
+
+              private void saveSelected() {
+                  Object o = appSpinner.getSelectedItem();
+                  if (!(o instanceof AppEntry)) {
+                      toast("没有可选择的应用");
+                      return;
+                  }
+                  AppEntry e = (AppEntry) o;
+                  Prefs.setTarget(this, e.pkg, e.cls);
+                  Prefs.clearMaintenance(this);
+                  toast("已保存：" + e.label);
+                  updateStatus();
+              }
+
+              private void openAccessibilitySettings() {
+                  try {
+                      Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                      startActivity(i);
+                  } catch (Exception e) {
+                      try {
+                          startActivity(new Intent(Settings.ACTION_SETTINGS));
+                      } catch (Exception ignored) {
+                          toast("极米系统没有开放无障碍设置入口");
+                      }
+                  }
+              }
+
+              private boolean isAccessibilityEnabled() {
+                  try {
+                      AccessibilityManager am = (AccessibilityManager)
+                              getSystemService(Context.ACCESSIBILITY_SERVICE);
+                      if (am == null) return false;
+                      List<AccessibilityServiceInfo> list =
+                              am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK);
+                      for (AccessibilityServiceInfo info : list) {
+                          ResolveInfo ri = info.getResolveInfo();
+                          if (ri != null && ri.serviceInfo != null
+                                  && getPackageName().equals(ri.serviceInfo.packageName)
+                                  && HomeKeyAccessibilityService.class.getName().equals(ri.serviceInfo.name)) {
+                              return true;
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  return false;
+              }
+
+              private void updateStatus() {
+                  if (status == null) return;
+                  String target = Prefs.targetPkg(this);
+                  status.setText(
+                          "影院软件：" + (target.isEmpty() ? "未选择" : target)
+                                  + "\n无障碍 HOME 服务：" + (isAccessibilityEnabled() ? "已开启" : "未开启")
+                                  + "\nHOME 键接管：" + (Prefs.homeEnabled(this) ? "开启" : "关闭")
+                                  + "\n捕获 HOME 次数：" + Prefs.homeCount(this)
+                                  + "\n开机自动启动：" + (Prefs.bootEnabled(this) ? "开启" : "关闭")
+                                  + "\n\n关键测试：启用无障碍后按 HOME，再回到本页看“捕获 HOME 次数”是否增加。"
+                  );
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+              }
+
+              private static class AppEntry {
+                  final String label;
+                  final String pkg;
+                  final String cls;
+
+                  AppEntry(String label, String pkg, String cls) {
+                      this.label = label;
+                      this.pkg = pkg;
+                      this.cls = cls;
+                  }
+
+                  @Override
+                  public String toString() {
+                      return label + "  (" + pkg + ")";
+                  }
+              }
+          }
+          EOF
+
+      - name: Build V3 APKs
+        run: |
+          gradle --no-daemon :app:assembleDiagnosticDebug :app:assembleProductionDebug
+
+      - name: Prepare output names
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/diagnostic/debug/app-diagnostic-debug.apk out/CinemaLauncher-V3-TEST.apk
+          cp app/build/outputs/apk/production/debug/app-production-debug.apk out/CinemaLauncher-V3-FINAL.apk
+          sha256sum out/*.apk > out/SHA256SUMS.txt
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: CinemaLauncher-V3-APKs
+          path: out/*
+          retention-days: 30
