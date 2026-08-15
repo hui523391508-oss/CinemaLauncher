@@ -1,0 +1,354 @@
+name: Build Cinema Desktop Assistant V6
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/privatecinema/desktopassistant
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'PrivateCinemaDesktopAssistantV6'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.privatecinema.desktopassistant'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.privatecinema.desktopassistant'
+                  minSdk 26
+                  targetSdk 28
+                  versionCode 10
+                  versionName '10.0'
+              }
+
+              flavorDimensions += 'edition'
+              productFlavors {
+                  diagnostic {
+                      dimension 'edition'
+                      versionCode 10
+                      versionName '10.0-v6-test'
+                      buildConfigField 'String', 'EDITION_NAME', '"V6测试版"'
+                  }
+                  production {
+                      dimension 'edition'
+                      versionCode 11
+                      versionName '11.0-v6-final'
+                      buildConfigField 'String', 'EDITION_NAME', '"V6最终版"'
+                  }
+              }
+
+              buildTypes {
+                  debug {
+                      minifyEnabled false
+                  }
+              }
+
+              buildFeatures {
+                  buildConfig true
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">私人影院桌面助手</string>
+              <string name="service_channel">私人影院桌面接管</string>
+              <string name="service_title">私人影院桌面助手正在运行</string>
+              <string name="service_text">负责开机启动、HOME返回和设备诊断</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.SET_WALLPAPER" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+
+              <application
+                  android:allowBackup="false"
+                  android:directBootAware="true"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:directBootAware="true"
+                      android:exported="true"
+                      android:screenOrientation="landscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".DesktopMonitorService"
+                      android:directBootAware="true"
+                      android:enabled="true"
+                      android:exported="false" />
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:directBootAware="true"
+                      android:enabled="true"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/Prefs.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          public final class Prefs {
+              private static final String NAME = "private_cinema_desktop_v6";
+              private static final String TARGET_PKG = "target_pkg";
+              private static final String TARGET_CLS = "target_cls";
+              private static final String TARGET_LABEL = "target_label";
+              private static final String HOME_ENABLED = "home_enabled";
+              private static final String BOOT_ENABLED = "boot_enabled";
+              private static final String SERVICE_WANTED = "service_wanted";
+              private static final String MAINTENANCE_UNTIL = "maintenance_until";
+              private static final String CLOSE_DIALOG_COUNT = "close_dialog_count";
+              private static final String HOMEKEY_COUNT = "homekey_count";
+              private static final String LAST_REASON = "last_reason";
+              private static final String LOCKED_BOOT_COUNT = "locked_boot_count";
+              private static final String BOOT_COUNT = "boot_count";
+              private static final String SCREEN_ON_COUNT = "screen_on_count";
+              private static final String USER_UNLOCKED_COUNT = "user_unlocked_count";
+              private static final String LAST_START_SOURCE = "last_start_source";
+              private static final String LAUNCH_ATTEMPT_COUNT = "launch_attempt_count";
+              private static final String LAUNCH_SUCCESS_COUNT = "launch_success_count";
+              private static final String LAUNCH_FAIL_COUNT = "launch_fail_count";
+              private static final String LAST_LAUNCH_ERROR = "last_launch_error";
+              private static final String LAST_WALLPAPER_STATUS = "last_wallpaper_status";
+              private static final String LAST_WALLPAPER_SOURCE = "last_wallpaper_source";
+              private Prefs() {}
+              private static SharedPreferences p(Context c) {
+                  Context storage = c;
+                  if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                      Context dp = c.createDeviceProtectedStorageContext();
+                      if (dp != null) storage = dp;
+                  }
+                  return storage.getSharedPreferences(NAME, Context.MODE_PRIVATE);
+              }
+              public static void setTarget(Context c, String label, String pkg, String cls) { p(c).edit().putString(TARGET_LABEL, label == null ? "" : label).putString(TARGET_PKG, pkg == null ? "" : pkg).putString(TARGET_CLS, cls == null ? "" : cls).apply(); }
+              public static String targetLabel(Context c) { return p(c).getString(TARGET_LABEL, ""); }
+              public static String targetPkg(Context c) { return p(c).getString(TARGET_PKG, ""); }
+              public static String targetCls(Context c) { return p(c).getString(TARGET_CLS, ""); }
+              public static boolean homeEnabled(Context c) { return p(c).getBoolean(HOME_ENABLED, true); }
+              public static void setHomeEnabled(Context c, boolean v) { p(c).edit().putBoolean(HOME_ENABLED, v).apply(); }
+              public static boolean bootEnabled(Context c) { return p(c).getBoolean(BOOT_ENABLED, true); }
+              public static void setBootEnabled(Context c, boolean v) { p(c).edit().putBoolean(BOOT_ENABLED, v).apply(); }
+              public static boolean serviceWanted(Context c) { return p(c).getBoolean(SERVICE_WANTED, true); }
+              public static void setServiceWanted(Context c, boolean v) { p(c).edit().putBoolean(SERVICE_WANTED, v).apply(); }
+              public static void setMaintenanceUntil(Context c, long t) { p(c).edit().putLong(MAINTENANCE_UNTIL, t).apply(); }
+              public static long maintenanceUntil(Context c) { return p(c).getLong(MAINTENANCE_UNTIL, 0L); }
+              public static void clearMaintenance(Context c) { p(c).edit().putLong(MAINTENANCE_UNTIL, 0L).apply(); }
+              public static void receivedCloseDialogs(Context c, String reason) { int n = p(c).getInt(CLOSE_DIALOG_COUNT, 0) + 1; p(c).edit().putInt(CLOSE_DIALOG_COUNT, n).putString(LAST_REASON, reason == null ? "(null)" : reason).apply(); }
+              public static void receivedHomeKey(Context c) { int n = p(c).getInt(HOMEKEY_COUNT, 0) + 1; p(c).edit().putInt(HOMEKEY_COUNT, n).apply(); }
+              public static void receivedLockedBoot(Context c) { int n = p(c).getInt(LOCKED_BOOT_COUNT, 0) + 1; p(c).edit().putInt(LOCKED_BOOT_COUNT, n).putString(LAST_START_SOURCE, "LOCKED_BOOT_COMPLETED").apply(); }
+              public static void receivedBoot(Context c) { int n = p(c).getInt(BOOT_COUNT, 0) + 1; p(c).edit().putInt(BOOT_COUNT, n).putString(LAST_START_SOURCE, "BOOT_COMPLETED").apply(); }
+              public static void receivedScreenOn(Context c) { int n = p(c).getInt(SCREEN_ON_COUNT, 0) + 1; p(c).edit().putInt(SCREEN_ON_COUNT, n).putString(LAST_START_SOURCE, "SCREEN_ON").apply(); }
+              public static void receivedUserUnlocked(Context c) { int n = p(c).getInt(USER_UNLOCKED_COUNT, 0) + 1; p(c).edit().putInt(USER_UNLOCKED_COUNT, n).putString(LAST_START_SOURCE, "USER_UNLOCKED").apply(); }
+              public static void launchAttempt(Context c) { int n = p(c).getInt(LAUNCH_ATTEMPT_COUNT, 0) + 1; p(c).edit().putInt(LAUNCH_ATTEMPT_COUNT, n).apply(); }
+              public static void launchSuccess(Context c) { int n = p(c).getInt(LAUNCH_SUCCESS_COUNT, 0) + 1; p(c).edit().putInt(LAUNCH_SUCCESS_COUNT, n).putString(LAST_LAUNCH_ERROR, "无").apply(); }
+              public static void launchFailure(Context c, String error) { int n = p(c).getInt(LAUNCH_FAIL_COUNT, 0) + 1; p(c).edit().putInt(LAUNCH_FAIL_COUNT, n).putString(LAST_LAUNCH_ERROR, error == null ? "未知" : error).apply(); }
+              public static int closeDialogsCount(Context c) { return p(c).getInt(CLOSE_DIALOG_COUNT, 0); }
+              public static int homeKeyCount(Context c) { return p(c).getInt(HOMEKEY_COUNT, 0); }
+              public static String lastReason(Context c) { return p(c).getString(LAST_REASON, "尚未收到"); }
+              public static int lockedBootCount(Context c) { return p(c).getInt(LOCKED_BOOT_COUNT, 0); }
+              public static int bootCount(Context c) { return p(c).getInt(BOOT_COUNT, 0); }
+              public static int screenOnCount(Context c) { return p(c).getInt(SCREEN_ON_COUNT, 0); }
+              public static int userUnlockedCount(Context c) { return p(c).getInt(USER_UNLOCKED_COUNT, 0); }
+              public static String lastStartSource(Context c) { return p(c).getString(LAST_START_SOURCE, "尚未收到"); }
+              public static int launchAttemptCount(Context c) { return p(c).getInt(LAUNCH_ATTEMPT_COUNT, 0); }
+              public static int launchSuccessCount(Context c) { return p(c).getInt(LAUNCH_SUCCESS_COUNT, 0); }
+              public static int launchFailCount(Context c) { return p(c).getInt(LAUNCH_FAIL_COUNT, 0); }
+              public static String lastLaunchError(Context c) { return p(c).getString(LAST_LAUNCH_ERROR, "无"); }
+              public static void setWallpaperStatus(Context c, String source, String status) { p(c).edit().putString(LAST_WALLPAPER_SOURCE, source == null ? "" : source).putString(LAST_WALLPAPER_STATUS, status == null ? "" : status).apply(); }
+              public static String lastWallpaperSource(Context c) { return p(c).getString(LAST_WALLPAPER_SOURCE, "尚未操作"); }
+              public static String lastWallpaperStatus(Context c) { return p(c).getString(LAST_WALLPAPER_STATUS, "尚未操作"); }
+              public static void resetDiagnostics(Context c) { p(c).edit().putInt(CLOSE_DIALOG_COUNT, 0).putInt(HOMEKEY_COUNT, 0).putString(LAST_REASON, "尚未收到").putInt(LOCKED_BOOT_COUNT, 0).putInt(BOOT_COUNT, 0).putInt(SCREEN_ON_COUNT, 0).putInt(USER_UNLOCKED_COUNT, 0).putString(LAST_START_SOURCE, "尚未收到").putInt(LAUNCH_ATTEMPT_COUNT, 0).putInt(LAUNCH_SUCCESS_COUNT, 0).putInt(LAUNCH_FAIL_COUNT, 0).putString(LAST_LAUNCH_ERROR, "无").apply(); }
+          }
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/AppUtils.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+          import android.content.ComponentName; import android.content.Context; import android.content.Intent; import android.content.pm.PackageManager; import android.content.pm.ResolveInfo; import java.util.ArrayList; import java.util.List;
+          public final class AppUtils {
+              private AppUtils() {}
+              public static boolean launchTarget(Context c) {
+                  String pkg = Prefs.targetPkg(c), cls = Prefs.targetCls(c); if (pkg.isEmpty()) { Prefs.launchFailure(c, "未选择目标桌面"); return false; } Prefs.launchAttempt(c);
+                  try { if (!cls.isEmpty()) { Intent explicit = new Intent(Intent.ACTION_MAIN); explicit.setComponent(new ComponentName(pkg, cls)); explicit.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_SINGLE_TOP); c.startActivity(explicit); Prefs.launchSuccess(c); return true; } } catch (Exception ignored) {}
+                  try { PackageManager pm = c.getPackageManager(); Intent i = pm.getLeanbackLaunchIntentForPackage(pkg); if (i == null) i = pm.getLaunchIntentForPackage(pkg); if (i == null) throw new IllegalStateException("系统没有返回启动Intent"); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED | Intent.FLAG_ACTIVITY_SINGLE_TOP); c.startActivity(i); Prefs.launchSuccess(c); return true; } catch (Exception e) { Prefs.launchFailure(c, e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage())); return false; }
+              }
+              public static ComponentName currentDefaultHome(Context c) { try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); ResolveInfo r = c.getPackageManager().resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY); if (r != null && r.activityInfo != null) return new ComponentName(r.activityInfo.packageName, r.activityInfo.name); } catch (Exception ignored) {} return null; }
+              public static List<ComponentName> listHomeActivities(Context c) { List<ComponentName> out = new ArrayList<>(); try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); List<ResolveInfo> list = c.getPackageManager().queryIntentActivities(i, PackageManager.MATCH_ALL); for (ResolveInfo r : list) if (r.activityInfo != null) out.add(new ComponentName(r.activityInfo.packageName, r.activityInfo.name)); } catch (Exception ignored) {} return out; }
+              public static String homeCandidates(Context c) { StringBuilder b = new StringBuilder(); for (ComponentName cn : listHomeActivities(c)) { if (b.length() > 0) b.append(" | "); b.append(cn.flattenToShortString()); } return b.length() == 0 ? "未发现" : b.toString(); }
+              public static boolean openOriginalHome(Context c) { String targetPkg = Prefs.targetPkg(c); for (ComponentName cn : listHomeActivities(c)) { if (c.getPackageName().equals(cn.getPackageName())) continue; if (!targetPkg.isEmpty() && targetPkg.equals(cn.getPackageName())) continue; try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); i.setComponent(cn); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP); c.startActivity(i); return true; } catch (Exception ignored) {} } ComponentName current = currentDefaultHome(c); if (current != null) try { Intent i = new Intent(Intent.ACTION_MAIN); i.addCategory(Intent.CATEGORY_HOME); i.setComponent(current); i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP); c.startActivity(i); return true; } catch (Exception ignored) {} return false; }
+          }
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/WallpaperUtils.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+          import android.app.WallpaperManager; import android.content.*; import android.graphics.*; import android.media.MediaScannerConnection; import android.net.Uri; import android.os.*; import android.provider.MediaStore; import java.io.*;
+          public final class WallpaperUtils {
+              public static final String FOLDER = "私人影院壁纸", BUILTIN_NAME = "私人影院桌面_内置测试壁纸.jpg", CUSTOM_NAME = "私人影院桌面_自定义.jpg"; private static final String INTERNAL_CUSTOM = "custom_wallpaper.jpg"; private WallpaperUtils() {}
+              public static Bitmap createBuiltInBitmap() { Bitmap bitmap = Bitmap.createBitmap(1920,1080,Bitmap.Config.ARGB_8888); Canvas c = new Canvas(bitmap); Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); p.setShader(new LinearGradient(0,0,1920,1080,new int[]{Color.rgb(20,28,39),Color.rgb(35,51,66),Color.rgb(46,42,51)},new float[]{0f,.58f,1f},Shader.TileMode.CLAMP)); c.drawRect(0,0,1920,1080,p); Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG); glow.setShader(new RadialGradient(1280,270,850,new int[]{Color.argb(55,122,157,181),Color.argb(0,122,157,181)},new float[]{0f,1f},Shader.TileMode.CLAMP)); c.drawCircle(1280,270,850,glow); Paint bottom = new Paint(Paint.ANTI_ALIAS_FLAG); bottom.setShader(new LinearGradient(0,690,0,1080,new int[]{Color.argb(0,0,0,0),Color.argb(105,0,0,0)},null,Shader.TileMode.CLAMP)); c.drawRect(0,690,1920,1080,bottom); return bitmap; }
+              public static boolean hasLegacyStoragePermission(Context c) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) return true; return c.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == android.content.pm.PackageManager.PERMISSION_GRANTED; }
+              public static String exportBuiltIn(Context c) { Bitmap b = createBuiltInBitmap(); try { String r = exportBitmap(c,b,BUILTIN_NAME); Prefs.setWallpaperStatus(c,"内置测试壁纸",r); return r; } finally { b.recycle(); } }
+              public static String importAndExport(Context c, Uri uri) { Bitmap b = decodeUri(c,uri); if (b == null) { String s="读取自定义图片失败"; Prefs.setWallpaperStatus(c,"自定义壁纸",s); return s; } try { saveInternalCustom(c,b); String r=exportBitmap(c,b,CUSTOM_NAME); Prefs.setWallpaperStatus(c,"自定义壁纸",r); return r; } finally { b.recycle(); } }
+              private static String exportBitmap(Context c, Bitmap bitmap, String fileName) { if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !hasLegacyStoragePermission(c)) return "需要先授予存储权限"; try { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { Uri p=saveMediaStore(c,bitmap,fileName,MediaStore.Images.Media.EXTERNAL_CONTENT_URI,Environment.DIRECTORY_PICTURES+"/"+FOLDER); Uri d=saveMediaStore(c,bitmap,fileName,MediaStore.Downloads.EXTERNAL_CONTENT_URI,Environment.DIRECTORY_DOWNLOADS+"/"+FOLDER); return "已保存到 Pictures/"+FOLDER+"/ 和 Download/"+FOLDER+"/\nPictures URI="+String.valueOf(p)+"\nDownload URI="+String.valueOf(d); } else { File pics=new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),FOLDER), downs=new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),FOLDER); if(!pics.exists()) pics.mkdirs(); if(!downs.exists()) downs.mkdirs(); File p=new File(pics,fileName), d=new File(downs,fileName); writeJpeg(bitmap,p); writeJpeg(bitmap,d); MediaScannerConnection.scanFile(c,new String[]{p.getAbsolutePath(),d.getAbsolutePath()},new String[]{"image/jpeg","image/jpeg"},null); return "已保存："+p.getAbsolutePath()+"\n并复制到："+d.getAbsolutePath(); } } catch(Exception e){ return "保存失败："+e.getClass().getSimpleName()+": "+String.valueOf(e.getMessage()); } }
+              private static Uri saveMediaStore(Context c, Bitmap b, String fileName, Uri collection, String relativePath) throws Exception { ContentResolver cr=c.getContentResolver(); ContentValues cv=new ContentValues(); cv.put(MediaStore.MediaColumns.DISPLAY_NAME,fileName); cv.put(MediaStore.MediaColumns.MIME_TYPE,"image/jpeg"); cv.put(MediaStore.MediaColumns.RELATIVE_PATH,relativePath); cv.put(MediaStore.MediaColumns.IS_PENDING,1); Uri uri=cr.insert(collection,cv); if(uri==null) throw new IllegalStateException("MediaStore insert 返回 null"); try(OutputStream os=cr.openOutputStream(uri,"w")){ if(os==null) throw new IllegalStateException("无法打开输出流"); if(!b.compress(Bitmap.CompressFormat.JPEG,95,os)) throw new IllegalStateException("JPEG写入失败"); } ContentValues done=new ContentValues(); done.put(MediaStore.MediaColumns.IS_PENDING,0); cr.update(uri,done,null,null); return uri; }
+              private static void writeJpeg(Bitmap b, File f) throws Exception { try(FileOutputStream fos=new FileOutputStream(f)){ if(!b.compress(Bitmap.CompressFormat.JPEG,95,fos)) throw new IllegalStateException("JPEG写入失败"); } }
+              private static void saveInternalCustom(Context c, Bitmap b) { try { writeJpeg(b,new File(c.getFilesDir(),INTERNAL_CUSTOM)); } catch(Exception ignored){} }
+              public static boolean hasInternalCustom(Context c) { return new File(c.getFilesDir(),INTERNAL_CUSTOM).exists(); }
+              public static String setLatestAsSystemWallpaper(Context c) { Bitmap b=null; String source; try { File custom=new File(c.getFilesDir(),INTERNAL_CUSTOM); if(custom.exists()){ b=BitmapFactory.decodeFile(custom.getAbsolutePath()); source="已导入自定义壁纸"; } else { b=createBuiltInBitmap(); source="内置测试壁纸"; } if(b==null) throw new IllegalStateException("壁纸Bitmap为空"); WallpaperManager.getInstance(c).setBitmap(b,null,true); String s="系统壁纸设置调用成功（当贝是否跟随系统壁纸需实机确认）"; Prefs.setWallpaperStatus(c,source,s); return s; } catch(Exception e){ String s="系统壁纸设置失败："+e.getClass().getSimpleName()+": "+String.valueOf(e.getMessage()); Prefs.setWallpaperStatus(c,"系统壁纸",s); return s; } finally { if(b!=null) b.recycle(); } }
+              private static Bitmap decodeUri(Context c, Uri uri) { try { BitmapFactory.Options bounds=new BitmapFactory.Options(); bounds.inJustDecodeBounds=true; try(InputStream in=c.getContentResolver().openInputStream(uri)){ BitmapFactory.decodeStream(in,null,bounds); } int sample=1; while(bounds.outWidth/sample>4096 || bounds.outHeight/sample>4096) sample*=2; BitmapFactory.Options opt=new BitmapFactory.Options(); opt.inSampleSize=sample; opt.inPreferredConfig=Bitmap.Config.ARGB_8888; try(InputStream in=c.getContentResolver().openInputStream(uri)){ return BitmapFactory.decodeStream(in,null,opt); } } catch(Exception e){ return null; } }
+          }
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/DesktopMonitorService.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+          import android.app.*; import android.content.*; import android.os.*;
+          public class DesktopMonitorService extends Service {
+              public static final String ACTION_START="com.privatecinema.desktopassistant.START_MONITOR", ACTION_STOP="com.privatecinema.desktopassistant.STOP_MONITOR", EXTRA_FROM_BOOT="from_boot"; private static final String CHANNEL="private_cinema_desktop_monitor"; private static final int NOTIFICATION_ID=6101; private static final long HOME_RELAUNCH_DELAY_MS=5300L; private final Handler handler=new Handler(Looper.getMainLooper()); private boolean registered;
+              private final BroadcastReceiver systemReceiver=new BroadcastReceiver(){ @Override public void onReceive(Context context,Intent intent){ if(intent==null)return; String action=intent.getAction(); if(Intent.ACTION_SCREEN_ON.equals(action)){ Prefs.receivedScreenOn(context); scheduleWakeLaunch(1800L); return;} if(Intent.ACTION_USER_UNLOCKED.equals(action)){ Prefs.receivedUserUnlocked(context); scheduleWakeLaunch(1200L); return;} if(!Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(action))return; String reason=intent.getStringExtra("reason"); Prefs.receivedCloseDialogs(context,reason); if(!"homekey".equals(reason))return; Prefs.receivedHomeKey(context); if(!Prefs.homeEnabled(context)||inMaintenance(context)||Prefs.targetPkg(context).isEmpty())return; handler.removeCallbacks(homeLaunch); handler.postDelayed(homeLaunch,HOME_RELAUNCH_DELAY_MS);} };
+              private final Runnable homeLaunch=()->{ if(Prefs.homeEnabled(this)&&!inMaintenance(this)) AppUtils.launchTarget(this); }; private final Runnable wakeLaunch=()->{ if(Prefs.bootEnabled(this)&&!inMaintenance(this)) AppUtils.launchTarget(this); }; private final Runnable bootFallback=()->{ if(Prefs.bootEnabled(this)){ Prefs.clearMaintenance(this); AppUtils.launchTarget(this);} };
+              private boolean inMaintenance(Context c){return System.currentTimeMillis()<Prefs.maintenanceUntil(c);} private void scheduleWakeLaunch(long delay){ if(!Prefs.bootEnabled(this)||inMaintenance(this)||Prefs.targetPkg(this).isEmpty())return; handler.removeCallbacks(wakeLaunch); handler.postDelayed(wakeLaunch,delay); }
+              @Override public void onCreate(){super.onCreate(); ensureChannel(); startForeground(NOTIFICATION_ID,buildNotification()); registerMonitor();}
+              @Override public int onStartCommand(Intent intent,int flags,int startId){String action=intent==null?null:intent.getAction(); if(ACTION_STOP.equals(action)){Prefs.setServiceWanted(this,false); stopSelf(); return START_NOT_STICKY;} Prefs.setServiceWanted(this,true); registerMonitor(); if(intent!=null&&intent.getBooleanExtra(EXTRA_FROM_BOOT,false)){handler.removeCallbacks(bootFallback); handler.postDelayed(bootFallback,6500L);} return START_STICKY;}
+              private void registerMonitor(){if(registered)return; IntentFilter f=new IntentFilter(); f.addAction(Intent.ACTION_CLOSE_SYSTEM_DIALOGS); f.addAction(Intent.ACTION_SCREEN_ON); f.addAction(Intent.ACTION_USER_UNLOCKED); registerReceiver(systemReceiver,f); registered=true;}
+              private void ensureChannel(){if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O){NotificationChannel ch=new NotificationChannel(CHANNEL,getString(R.string.service_channel),NotificationManager.IMPORTANCE_MIN); ch.setSound(null,null); ch.enableVibration(false); ch.setShowBadge(false); NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE); if(nm!=null)nm.createNotificationChannel(ch);}}
+              private Notification buildNotification(){Intent open=new Intent(this,MainActivity.class); PendingIntent pi=PendingIntent.getActivity(this,0,open,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE); Notification.Builder b=Build.VERSION.SDK_INT>=Build.VERSION_CODES.O?new Notification.Builder(this,CHANNEL):new Notification.Builder(this); return b.setSmallIcon(android.R.drawable.ic_menu_view).setContentTitle(getString(R.string.service_title)).setContentText(getString(R.string.service_text)).setContentIntent(pi).setOngoing(true).setShowWhen(false).build();}
+              @Override public void onDestroy(){handler.removeCallbacksAndMessages(null); if(registered){try{unregisterReceiver(systemReceiver);}catch(Exception ignored){} registered=false;} super.onDestroy();} @Override public IBinder onBind(Intent intent){return null;}
+          }
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/BootReceiver.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+          import android.content.*; import android.os.Build;
+          public class BootReceiver extends BroadcastReceiver { @Override public void onReceive(Context context,Intent intent){ if(intent==null)return; String action=intent.getAction(); if(!Intent.ACTION_BOOT_COMPLETED.equals(action)&&!Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action))return; if(Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)) Prefs.receivedLockedBoot(context); else Prefs.receivedBoot(context); if(!Prefs.serviceWanted(context)&&!Prefs.bootEnabled(context))return; Intent s=new Intent(context,DesktopMonitorService.class); s.setAction(DesktopMonitorService.ACTION_START); s.putExtra(DesktopMonitorService.EXTRA_FROM_BOOT,true); try{ if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O) context.startForegroundService(s); else context.startService(s);}catch(Exception e){Prefs.launchFailure(context,"启动监听服务失败："+e.getClass().getSimpleName());} } }
+          EOF
+
+          cat > app/src/main/java/com/privatecinema/desktopassistant/MainActivity.java <<'EOF'
+          package com.privatecinema.desktopassistant;
+          import android.Manifest; import android.app.Activity; import android.content.*; import android.content.pm.*; import android.net.Uri; import android.os.*; import android.view.Gravity; import android.widget.*; import java.util.*;
+          public class MainActivity extends Activity {
+              private static final int REQ_STORAGE=601, REQ_PICK_IMAGE=602; private Spinner appSpinner; private TextView status; private final List<AppEntry> apps=new ArrayList<>();
+              @Override protected void onCreate(Bundle state){super.onCreate(state); buildUi(); refreshApps(); if(Prefs.serviceWanted(this))startMonitor(false,false);} @Override protected void onResume(){super.onResume(); updateStatus();}
+              private void buildUi(){ScrollView scroll=new ScrollView(this); LinearLayout root=new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(42,26,42,44); root.setGravity(Gravity.CENTER_HORIZONTAL); scroll.addView(root); TextView title=text("私人影院桌面助手 · "+BuildConfig.EDITION_NAME,25); title.setGravity(Gravity.CENTER); root.addView(title,fullWidth()); root.addView(text("\n用途：选择当贝桌面等目标桌面 → 开机自动进入 → HOME返回目标桌面。\n壁纸：内置测试壁纸可直接释放到固定目录；最终壁纸可通过“导入自定义壁纸”后同样释放。\n雷鸟/VIDDA：底部诊断信息会记录开机、唤醒、HOME、启动失败原因和系统桌面信息。\n",15),fullWidth()); addSection(root,"① 目标桌面"); appSpinner=new Spinner(this); appSpinner.setFocusable(true); root.addView(appSpinner,fullWidth()); Button save=button("保存为开机/HOME目标桌面"); save.setOnClickListener(v->saveSelected()); root.addView(save,fullWidth()); Button scan=button("重新扫描应用 / 桌面"); scan.setOnClickListener(v->refreshApps()); root.addView(scan,fullWidth()); Button test=button("测试打开目标桌面"); test.setOnClickListener(v->{Prefs.clearMaintenance(this); toast(AppUtils.launchTarget(this)?"已发起目标桌面启动":"启动失败，请看诊断"); updateStatus();}); root.addView(test,fullWidth()); addSection(root,"② 开机与 HOME 接管"); Button monitor=button("启动桌面监听服务（建议保持运行）"); monitor.setOnClickListener(v->startMonitor(false,true)); root.addView(monitor,fullWidth()); Button homeOn=button("开启 HOME 返回目标桌面"); homeOn.setOnClickListener(v->{Prefs.setHomeEnabled(this,true);Prefs.clearMaintenance(this);updateStatus();toast("HOME接管已开启");}); root.addView(homeOn,fullWidth()); Button homeOff=button("关闭 HOME 接管"); homeOff.setOnClickListener(v->{Prefs.setHomeEnabled(this,false);updateStatus();toast("HOME接管已关闭");}); root.addView(homeOff,fullWidth()); Button bootOn=button("开启开机自动进入目标桌面"); bootOn.setOnClickListener(v->{Prefs.setBootEnabled(this,true);Prefs.setServiceWanted(this,true);startMonitor(false,false);updateStatus();toast("开机自动启动已开启");}); root.addView(bootOn,fullWidth()); Button bootOff=button("关闭开机自动启动"); bootOff.setOnClickListener(v->{Prefs.setBootEnabled(this,false);updateStatus();toast("开机自动启动已关闭");}); root.addView(bootOff,fullWidth()); Button original=button("进入原厂系统桌面（暂停接管10分钟）"); original.setOnClickListener(v->{Prefs.setMaintenanceUntil(this,System.currentTimeMillis()+10*60*1000L); if(!AppUtils.openOriginalHome(this))toast("没有找到可打开的原厂桌面");updateStatus();}); root.addView(original,fullWidth()); Button resume=button("结束维护并恢复接管"); resume.setOnClickListener(v->{Prefs.clearMaintenance(this);toast("已恢复接管");updateStatus();}); root.addView(resume,fullWidth()); addSection(root,"③ 壁纸工具"); root.addView(text("固定目录：Pictures/私人影院壁纸/ 和 Download/私人影院壁纸/\nV6当前内置的是无文字深色渐变测试壁纸，用于验证雷鸟/VIDDA/极米能否找到图片。最终壁纸定稿后可直接替换内置资源。",14),fullWidth()); Button exportBuiltin=button("释放内置测试壁纸到固定目录"); exportBuiltin.setOnClickListener(v->exportBuiltIn()); root.addView(exportBuiltin,fullWidth()); Button importCustom=button("导入自定义壁纸 → 自动复制到固定目录"); importCustom.setOnClickListener(v->pickImage()); root.addView(importCustom,fullWidth()); Button setSystem=button("尝试将内置/已导入壁纸设为系统壁纸"); setSystem.setOnClickListener(v->{toast(WallpaperUtils.setLatestAsSystemWallpaper(this));updateStatus();}); root.addView(setSystem,fullWidth()); addSection(root,"④ 雷鸟 / VIDDA / 极米诊断"); Button reset=button("清零启动诊断计数"); reset.setOnClickListener(v->{Prefs.resetDiagnostics(this);updateStatus();}); root.addView(reset,fullWidth()); Button copy=button("复制完整诊断信息"); copy.setOnClickListener(v->copyDiagnostics()); root.addView(copy,fullWidth()); status=text("",14); status.setTextIsSelectable(true); status.setPadding(0,18,0,30); root.addView(status,fullWidth()); setContentView(scroll);}
+              private void addSection(LinearLayout root,String s){TextView t=text("\n"+s,20);t.setTypeface(null,android.graphics.Typeface.BOLD);root.addView(t,fullWidth());} private TextView text(String s,float size){TextView t=new TextView(this);t.setText(s);t.setTextSize(size);return t;} private Button button(String s){Button b=new Button(this);b.setText(s);b.setTextSize(17);b.setFocusable(true);return b;} private LinearLayout.LayoutParams fullWidth(){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,LinearLayout.LayoutParams.WRAP_CONTENT);p.setMargins(0,6,0,6);return p;}
+              private void startMonitor(boolean fromBoot,boolean showToast){Prefs.setServiceWanted(this,true);Intent s=new Intent(this,DesktopMonitorService.class);s.setAction(DesktopMonitorService.ACTION_START);s.putExtra(DesktopMonitorService.EXTRA_FROM_BOOT,fromBoot);try{if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O)startForegroundService(s);else startService(s);if(showToast)toast("监听服务已启动");}catch(Exception e){if(showToast)toast("监听服务启动失败："+e.getClass().getSimpleName());}updateStatus();}
+              private void refreshApps(){apps.clear();Set<String>seen=new HashSet<>();collect(Intent.CATEGORY_LEANBACK_LAUNCHER,seen);collect(Intent.CATEGORY_LAUNCHER,seen);collect(Intent.CATEGORY_HOME,seen);Collections.sort(apps,(a,b)->{int pa=a.isDangbei?0:1,pb=b.isDangbei?0:1;if(pa!=pb)return pa-pb;return a.label.toLowerCase(Locale.ROOT).compareTo(b.label.toLowerCase(Locale.ROOT));});ArrayAdapter<AppEntry>adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,apps);adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);appSpinner.setAdapter(adapter);String savedPkg=Prefs.targetPkg(this),savedCls=Prefs.targetCls(this);boolean selected=false;for(int i=0;i<apps.size();i++){AppEntry e=apps.get(i);if(e.pkg.equals(savedPkg)&&e.cls.equals(savedCls)){appSpinner.setSelection(i);selected=true;break;}}if(!selected)for(int i=0;i<apps.size();i++)if(apps.get(i).isDangbei){appSpinner.setSelection(i);break;}updateStatus();}
+              private void collect(String category,Set<String>seen){try{PackageManager pm=getPackageManager();Intent q=new Intent(Intent.ACTION_MAIN);q.addCategory(category);List<ResolveInfo>list=pm.queryIntentActivities(q,PackageManager.MATCH_ALL);for(ResolveInfo r:list){if(r.activityInfo==null)continue;String pkg=r.activityInfo.packageName,cls=r.activityInfo.name;if(getPackageName().equals(pkg))continue;String key=pkg+"/"+cls;if(!seen.add(key))continue;CharSequence cs=r.loadLabel(pm);String label=cs==null?pkg:cs.toString();String low=(label+" "+pkg).toLowerCase(Locale.ROOT);boolean dangbei=label.contains("当贝")||low.contains("dangbei")||low.contains("dblauncher");apps.add(new AppEntry(label,pkg,cls,dangbei));}}catch(Exception ignored){}}
+              private void saveSelected(){Object o=appSpinner.getSelectedItem();if(!(o instanceof AppEntry)){toast("没有可选择的应用/桌面");return;}AppEntry e=(AppEntry)o;Prefs.setTarget(this,e.label,e.pkg,e.cls);Prefs.clearMaintenance(this);toast("已保存目标桌面："+e.label);updateStatus();}
+              private void exportBuiltIn(){if(Build.VERSION.SDK_INT<Build.VERSION_CODES.Q&&checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},REQ_STORAGE);toast("请授予存储权限后再点一次“释放内置测试壁纸”");return;}toast(WallpaperUtils.exportBuiltIn(this));updateStatus();}
+              private void pickImage(){Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("image/*");try{startActivityForResult(i,REQ_PICK_IMAGE);}catch(Exception e){toast("系统没有可用的图片选择器");}}
+              @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){super.onActivityResult(requestCode,resultCode,data);if(requestCode!=REQ_PICK_IMAGE||resultCode!=RESULT_OK||data==null||data.getData()==null)return;Uri uri=data.getData();try{final int flags=data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);getContentResolver().takePersistableUriPermission(uri,flags&Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(Exception ignored){}if(Build.VERSION.SDK_INT<Build.VERSION_CODES.Q&&checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},REQ_STORAGE);toast("已选图片，但需要存储权限；授权后请重新导入一次");return;}toast(WallpaperUtils.importAndExport(this,uri));updateStatus();}
+              private String diagnostics(){ComponentName home=AppUtils.currentDefaultHome(this);long left=Math.max(0L,Prefs.maintenanceUntil(this)-System.currentTimeMillis());return "私人影院桌面助手 "+BuildConfig.EDITION_NAME+"\n设备厂商 Manufacturer："+Build.MANUFACTURER+"\n品牌 Brand："+Build.BRAND+"\n型号 Model："+Build.MODEL+"\n设备 Device："+Build.DEVICE+"\nAndroid："+Build.VERSION.RELEASE+" / SDK "+Build.VERSION.SDK_INT+"\nBuild Display："+Build.DISPLAY+"\n当前默认HOME："+(home==null?"未解析":home.flattenToShortString())+"\n发现的HOME候选："+AppUtils.homeCandidates(this)+"\n目标桌面："+(Prefs.targetLabel(this).isEmpty()?"未选择":Prefs.targetLabel(this))+"\n目标包名："+Prefs.targetPkg(this)+"\n目标Activity："+Prefs.targetCls(this)+"\n开机自动启动："+(Prefs.bootEnabled(this)?"开启":"关闭")+"\nHOME返回目标桌面："+(Prefs.homeEnabled(this)?"开启":"关闭")+"\n监听服务目标状态："+(Prefs.serviceWanted(this)?"运行":"停止")+"\nLOCKED_BOOT_COMPLETED："+Prefs.lockedBootCount(this)+"\nBOOT_COMPLETED："+Prefs.bootCount(this)+"\nSCREEN_ON："+Prefs.screenOnCount(this)+"\nUSER_UNLOCKED："+Prefs.userUnlockedCount(this)+"\nCLOSE_SYSTEM_DIALOGS："+Prefs.closeDialogsCount(this)+"\nreason=homekey："+Prefs.homeKeyCount(this)+"\n最后一次reason："+Prefs.lastReason(this)+"\n最近启动触发来源："+Prefs.lastStartSource(this)+"\n目标启动尝试："+Prefs.launchAttemptCount(this)+"\n目标启动成功："+Prefs.launchSuccessCount(this)+"\n目标启动失败："+Prefs.launchFailCount(this)+"\n最近启动错误："+Prefs.lastLaunchError(this)+"\n维护剩余："+(left>0?left/1000+"秒":"无")+"\n外部存储状态："+Environment.getExternalStorageState()+"\n固定壁纸目录：Pictures/"+WallpaperUtils.FOLDER+"/ ; Download/"+WallpaperUtils.FOLDER+"/\n已导入自定义壁纸："+(WallpaperUtils.hasInternalCustom(this)?"是":"否")+"\n最近壁纸来源："+Prefs.lastWallpaperSource(this)+"\n最近壁纸结果："+Prefs.lastWallpaperStatus(this);}
+              private void updateStatus(){if(status!=null)status.setText(diagnostics());} private void copyDiagnostics(){ClipboardManager cm=(ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);if(cm!=null){cm.setPrimaryClip(ClipData.newPlainText("V6诊断",diagnostics()));toast("诊断信息已复制");}} private void toast(String s){Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
+              private static final class AppEntry{final String label,pkg,cls;final boolean isDangbei;AppEntry(String label,String pkg,String cls,boolean isDangbei){this.label=label;this.pkg=pkg;this.cls=cls;this.isDangbei=isDangbei;}@Override public String toString(){return(isDangbei?"★ ":"")+label+"  ("+pkg+")";}}
+          }
+          EOF
+
+      - name: Build V6 APKs
+        run: |
+          gradle --no-daemon :app:assembleDiagnosticDebug :app:assembleProductionDebug
+
+      - name: Prepare output names
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/diagnostic/debug/app-diagnostic-debug.apk out/PrivateCinemaDesktopAssistant-V6-TEST.apk
+          cp app/build/outputs/apk/production/debug/app-production-debug.apk out/PrivateCinemaDesktopAssistant-V6-FINAL.apk
+          sha256sum out/*.apk > out/SHA256SUMS.txt
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivateCinemaDesktopAssistant-V6-APKs
+          path: out/*
+          retention-days: 30
