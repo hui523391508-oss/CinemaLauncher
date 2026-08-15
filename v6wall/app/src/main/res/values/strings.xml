@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">私人影院桌面助手</string>
+    <string name="service_channel">私人影院桌面接管</string>
+    <string name="service_title">私人影院桌面助手正在运行</string>
+    <string name="service_text">负责开机启动、HOME返回和设备诊断</string>
+</resources>
