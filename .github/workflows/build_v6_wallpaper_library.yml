@@ -1,0 +1,98 @@
+name: Build V6 Wallpaper Library APKs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build_v6_wallpaper_library.yml"
+      - "v6wall/**"
+      - "wallpapers.zip"
+      - "壁纸.zip"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Embed 12 wallpapers
+        shell: bash
+        run: |
+          set -e
+          WALL_ZIP=""
+          if [ -f "wallpapers.zip" ]; then
+            WALL_ZIP="wallpapers.zip"
+          elif [ -f "壁纸.zip" ]; then
+            WALL_ZIP="壁纸.zip"
+          else
+            echo "::error::请把 wallpapers.zip 或 壁纸.zip 上传到仓库根目录"
+            exit 1
+          fi
+
+          rm -rf wallpaper_src v6wall/app/src/main/res/drawable-nodpi
+          mkdir -p wallpaper_src v6wall/app/src/main/res/drawable-nodpi
+          unzip -q "$WALL_ZIP" -d wallpaper_src
+
+          mapfile -t WALL_FILES < <(find wallpaper_src -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) | sort)
+          if [ "${#WALL_FILES[@]}" -ne 12 ]; then
+            echo "::error::压缩包必须包含12张图片，实际找到 ${#WALL_FILES[@]} 张"
+            printf '%s\n' "${WALL_FILES[@]}"
+            exit 1
+          fi
+
+          idx=1
+          for f in "${WALL_FILES[@]}"; do
+            ext="${f##*.}"
+            ext="$(echo "$ext" | tr '[:upper:]' '[:lower:]')"
+            [ "$ext" = "jpeg" ] && ext="jpg"
+            out="v6wall/app/src/main/res/drawable-nodpi/wallpaper_$(printf '%02d' "$idx").${ext}"
+            cp "$f" "$out"
+            echo "Wallpaper $idx: $f -> $out"
+            idx=$((idx+1))
+          done
+
+          echo "Embedded wallpaper files:"
+          ls -lh v6wall/app/src/main/res/drawable-nodpi/
+
+      - name: Build V6 wallpaper library APKs
+        working-directory: v6wall
+        run: |
+          gradle --no-daemon :app:assembleDiagnosticDebug :app:assembleProductionDebug
+
+      - name: Prepare output names
+        run: |
+          mkdir -p out
+          cp v6wall/app/build/outputs/apk/diagnostic/debug/app-diagnostic-debug.apk out/PrivateCinemaDesktopAssistant-V6-WALLPAPERS-TEST.apk
+          cp v6wall/app/build/outputs/apk/production/debug/app-production-debug.apk out/PrivateCinemaDesktopAssistant-V6-WALLPAPERS-FINAL.apk
+          sha256sum out/*.apk > out/SHA256SUMS.txt
+          ls -lh out
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivateCinemaDesktopAssistant-V6-WALLPAPERS-APKs
+          path: out/*
+          retention-days: 30
