@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.privatecinema.desktopassistant'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.privatecinema.desktopassistant'
+        minSdk 26
+        targetSdk 28
+        versionCode 12
+        versionName '12.0'
+    }
+
+    flavorDimensions += 'edition'
+    productFlavors {
+        diagnostic {
+            dimension 'edition'
+            versionCode 12
+            versionName '12.0-v6-wallpapers-test'
+            buildConfigField 'String', 'EDITION_NAME', '"V6壁纸库测试版"'
+        }
+        production {
+            dimension 'edition'
+            versionCode 13
+            versionName '13.0-v6-wallpapers-final'
+            buildConfigField 'String', 'EDITION_NAME', '"V6壁纸库最终版"'
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
